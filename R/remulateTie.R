@@ -164,25 +164,24 @@
 #'
 #' @export
 remulateTie <- function(
-  effects,
-  actors,
-  time ,
-  events = NULL,
-  startTime = 0,
-  initial = 0,
-  riskset = NULL,
-  memory = c("full", "window", "window_m", "decay"),
-  memoryParam = NULL) {
-
-  waiting_time="exp"
-
-  if(inherits(effects, "remstimate")){
+    effects,
+    actors,
+    time,
+    events = NULL,
+    startTime = 0,
+    initial = 0,
+    riskset = NULL,
+    memory = c("full", "window", "window_m", "decay"),
+    memoryParam = NULL) {
+  
+  waiting_time = "exp"
+  
+  if (inherits(effects, "remstimate")) {
     parsed_effects <- parseEffectsTieRemstimate(effects)
-  }else if(inherits(effects, "formula")){
+  } else if (inherits(effects, "formula")) {
     parsed_effects <- parseEffectsTie(effects)
   }
   
-
   params <- parsed_effects$params
   scaling <- parsed_effects$scaling
   mem_start <- parsed_effects$mem_start
@@ -191,224 +190,111 @@ remulateTie <- function(
   attributes <- parsed_effects$attributes
   interact_effects <- parsed_effects$interact_effects
   effect_names <- unname(parsed_effects$effects)
-
+  
   P <- length(effect_names)
-
-  memory<- match.arg(memory)
-  #checking memory specification
-  if (!memory[1] %in% c("full", "window", "window_m", "decay")) {
-    stop(paste("\n'", memory[1], "'memory method not defined"))
+  
+  memory <- match.arg(memory)
+  
+  if (!memory %in% c("full", "window", "window_m", "decay")) {
+    stop(paste("\n'", memory, "' memory method not defined"))
   }
   if (memory != "full" && is.null(memoryParam)) {
-    if (memory[1] == "window" || memory[1] == "window_m") {
-      stop(paste("Cannot use window memory technique without a memoryParam value"))
-    } else if (memoryParam <= 0) {
-      stop(paste("memoryParam must be positive"))
-    }
-  }
-
-  #create a map for user name actor references - integer actor ids for computing
-  actors_map <- data.frame(id = 1:length(actors), name = actors)
-
-  #Create a risk set
-  if (!is.null(riskset)) { #custom riskset
-    if (any(!riskset[[1]] %in% actors_map$name)) {
-      stop("risk set contains sender actor not specified in actor's list")
-    } else if (any(!riskset[[2]] %in% actors_map$name)) {
-      stop("risk set contains receiver actor not specified in actor's list")
-    }
-    #convert names in riskset to ids
-    rs <- riskset
-    rs[,2] <- sapply(rs[,2], function(x) {
-      actors_map$id[match(x,actors_map$name)]
-    })
-    rs[,1] <- sapply(rs[,1], function(x) {
-        actors_map$id[match(x,actors_map$name)]
-    })
-  }else{
-    #TODO: allow risk set to vary with time (enhancement:feature)
-    rs <- as.matrix(expand.grid(actors_map$id, actors_map$id))
-    colnames(rs) <- c("sender", "receiver")
-    rs <- rs[rs[, "sender"] != rs[, "receiver"],]
-  }
-
-  #initialize start time as t=0 if simulating cold-start else set t as time of last event in initial edgelist
-  if(is.data.frame(initial)){
-      t <- initial[nrow(initial),1]
-      if(t > time){
-        stop("Last event of initial data.frame is after 'time' argument")
-      }
-  }else{
-      #in case is.numeric(initial) OR intial == NULL
-      t<- startTime
-  }
-    
-  #TODO: check if exogenous effect doesnt change with time only once (enhancement:comp time)
-  #initialize attributes
-  attributes <- initialize_exo_effects(attributes, actors_map, parsed_effects)
-
-  #initialize params
-  beta <- vector(length = P)
-  for (i in 1:P) {
-    if(is.function(params[[i]])){
-      #function must be defined at t=0
-      beta[i] <- params[[i]](t)
-    } else {
-      beta[i] <- params[[i]]
-    }
-  }
-
-  #initialize output objects
-  statistics <- list() #list of matrices
-  statistics[[1]] <- array(0, dim = c(nrow(rs), P))
-  if(any(int_effects==1)){ #fill in baseline for first time point
-    statistics[[1]][,which(int_effects==1)] <- array(1,dim=c(nrow(rs),1))
-  }
-  edgelist <- array(0, dim = c(1, 3))
-  evls <- array(0, dim = c(1, 2))
-  # probs <- array(0,dim=c(1,nrow(rs)))
-
-  #stores the event counts for dyads in a #sender x #recv matrix
-  adj_mat <- initialize_adj_mat(actors_map, initial, rs)
-
-  i = 1
-
-  while(t <= time){
-    #updating event rate / lambda
-    if (P == 1) {
-      lambda <- exp(statistics[[i]] * beta)
-    } else {
-      lambda <- exp(statistics[[i]] %*% beta)
-    }
-
-    #sampling waiting time dt
-    if (waiting_time == "exp") {
-      dt <- rexp(1, rate = sum(lambda))
-      t <- t + dt
-    }
-    # else if (waiting_time == "weibull") {
-    #   #TODO: add checks on time params
-    #   dt <- rweibull(1, shape = time_param, scale = sum(lambda))
-    #   t <- t + dt
-    # }
-    # else if (waiting_time == "gompertz") {
-    #   dt <- rgompertz(1, scale = sum(lambda), shape = time_param)
-    #   t <- t + dt
-    # }
-
-    if(t > time){
-      cat(i-1, "events generated \n")
-      break
-    }
-
-    #sampling dyad for next event
-    # R sampling slightly faster than arma sampling (due to hashing)
-    dyad <- sample(1:nrow(rs), 1, prob = lambda / sum(lambda))    
-
-    edgelist[i,] <- c(t, rs[dyad, 1], rs[dyad, 2])
-    evls[i,] <- c(dyad, t)
-
-    #update adj mat
-    #TODO: move to C++
-    if (memory == "full") {
-      adj_mat[edgelist[i, 2], edgelist[i, 3]] = adj_mat[edgelist[i, 2], edgelist[i, 3]] + 1;
-    }
-    else if (memory == "window") {
-      #window memory takes memory by time window
-      #TODO: to vectorize
-      adj_mat[] <- 0
-      in_window <- which(edgelist[, 1] > t - memoryParam) #event indices which are in memoryParam
-      for (ind in in_window) {
-        adj_mat[edgelist[ind, 2], edgelist[ind, 3]] = adj_mat[edgelist[ind, 2], edgelist[ind, 3]] + 1;
-      }
-    }
-    else if (memory == "window_m") {
-      #window_m takes memory by last m events
-      if (memoryParam < i) {
-        adj_mat[] <- 0
-        print(paste("memory in:", i - memoryParam, "to", i))
-        for (ind in c(i - memoryParam, i)) {
-          adj_mat[edgelist[ind, 2], edgelist[ind, 3]] = adj_mat[edgelist[ind, 2], edgelist[ind, 3]] + 1;
-        }
-      } else {
-        adj_mat[edgelist[i, 2], edgelist[i, 3]] = adj_mat[edgelist[i, 2], edgelist[i, 3]] + 1;
-      }
-    }
-    else if (memory == "decay") {
-      #TODO: to vectorize
-      adj_mat[] <- 0
-      for (j in 1:i) {
-        #loop through edgelist
-        adj_mat[edgelist[j, 2], edgelist[j, 3]] = adj_mat[edgelist[j, 2], edgelist[j, 3]] + exp((-(t - edgelist[j, 1])) * (log(2) / memoryParam))
-      }
-    }
-    
-    #stop if max number of events reached
-    if(!is.null(events) && i-1>=events){
-      cat(paste0("Stopping: maximum number of events (",i-1,") sampled \n"))
-      break
-    }
-
-    statistics[[i + 1]] <- computeStatsTie(int_effects, rs, actors_map$id, edgelist, adj_mat, attributes, interact_effects, scaling, mem_start, mem_end, statistics[[i]])
-    
-    #add row for next iteration
-    edgelist <- rbind(edgelist, array(0, dim = c(1, 3)))
-    evls <- rbind(evls, array(0, dim = c(1, 2)))
-    #probs <- rbind(probs, array(0, dim = c(1,nrow(rs))))
-
-    #update beta
-    for (j in 1:P) {
-     if(is.function(params[[j]])){
-        beta[j] <- params[[j]](t)
-      } else {
-        beta[j] <- params[[j]]
-      }
-    }
-    i=i+1
+    stop("Cannot use memory technique without a memoryParam value")
   }
   
-  #combine stats from list to 3d array
+  actors_map <- data.frame(id = 1:length(actors), name = actors)
+  
+  if (!is.null(riskset)) {
+    if (any(!riskset[[1]] %in% actors_map$name) || any(!riskset[[2]] %in% actors_map$name)) {
+      stop("Risk set contains actors not specified in actor's list")
+    }
+    rs <- riskset
+    rs[, 1] <- sapply(rs[, 1], function(x) actors_map$id[match(x, actors_map$name)])
+    rs[, 2] <- sapply(rs[, 2], function(x) actors_map$id[match(x, actors_map$name)])
+  } else {
+    rs <- as.matrix(expand.grid(actors_map$id, actors_map$id))
+    rs <- rs[rs[, 1] != rs[, 2], ]
+  }
+  
+  t <- if (is.data.frame(initial)) initial[nrow(initial), 1] else startTime
+  if (is.data.frame(initial) && t > time) {
+    stop("Last event of initial data.frame is after 'time' argument")
+  }
+  
+  attributes <- initialize_exo_effects(attributes, actors_map, parsed_effects)
+  beta <- sapply(params, function(p) if (is.function(p)) p(t) else p)
+  
+  statistics <- list()
+  statistics[[1]] <- array(0, dim = c(nrow(rs), P))
+  if (any(int_effects == 1)) {
+    statistics[[1]][, which(int_effects == 1)] <- 1
+  }
+  
+  edgelist <- matrix(0, nrow = 1, ncol = 3)
+  evls <- matrix(0, nrow = 1, ncol = 2)
+  adj_mat <- initialize_adj_mat(actors_map, initial, rs)
+  
+  i <- 1
+  if (!is.null(events)) {
+    pb <- utils::txtProgressBar(min = 0, max = events, style = 3)
+  }
+  
+  while (t <= time) {
+    lambda <- exp(statistics[[i]] %*% beta)
+    dt <- rexp(1, rate = sum(lambda))
+    t <- t + dt
+    
+    if (t > time) {
+      cat(i - 1, "events generated \n")
+      break
+    }
+    
+    dyad <- sample(1:nrow(rs), 1, prob = lambda / sum(lambda))    
+    edgelist <- rbind(edgelist, c(t, rs[dyad, 1], rs[dyad, 2]))
+    evls <- rbind(evls, c(dyad, t))
+    adj_mat[edgelist[i, 2], edgelist[i, 3]] <- adj_mat[edgelist[i, 2], edgelist[i, 3]] + 1
+    
+    if (!is.null(events)) {
+      utils::setTxtProgressBar(pb, i)
+    }
+    
+    if (!is.null(events) && i >= events) {
+      cat("Stopping: maximum number of events sampled\n")
+      break
+    }
+    
+    statistics[[i + 1]] <- computeStatsTie(int_effects, rs, actors_map$id, edgelist, adj_mat, attributes, interact_effects, scaling, mem_start, mem_end, statistics[[i]])
+    beta <- sapply(params, function(p) if (is.function(p)) p(t) else p)
+    i <- i + 1
+  }
+  
+  if (!is.null(events)) {
+    close(pb)
+  }
+  
   statistics <- array(
     data = do.call(rbind, lapply(statistics, as.vector)),
-    dim = c(length(statistics), dim(statistics[[1]]))
+    dim = c(length(statistics) - 1, dim(statistics[[1]]))
   )
-
-  statistics <- statistics[-dim(statistics)[1],,]
-  edgelist <- edgelist[-dim(edgelist)[1],]
-  evls <- evls[-dim(evls)[1],]
-
-  edgelist <- as.data.frame(edgelist)
+  edgelist <- as.data.frame(edgelist[-1, ])
   colnames(edgelist) <- c("time", "sender", "receiver")
-
-  #change actor ids to names in edgelist
-  edgelist["sender"] <- lapply(edgelist["sender"], function(x) {
-    actors_map$name[x]
-  })
-  edgelist["receiver"] <- lapply(edgelist["receiver"], function(x) {
-    actors_map$name[x]
-  })
-
-  names(params) <- effect_names
-
-  #return objects
-  if(P!=1){
-    dimnames(statistics) <- list(NULL, NULL, effect_names)
-  }
-
+  
+  edgelist$sender <- actors_map$name[edgelist$sender]
+  edgelist$receiver <- actors_map$name[edgelist$receiver]
+  
   output <- structure(
-  edgelist,
-  evls       = evls,
-  params     = params,
-  statistics = statistics,
-  riskset    = rs,
-  actors     = actors_map,
-  initial    = initial,
-  effects    = effects,
-  density    = get.density(evls, actors),
-  class      = c("remulateTie", "data.frame")
-)
-
-return(output)
-
-
+    edgelist,
+    evls = evls[-1, ],
+    params = params,
+    statistics = statistics,
+    riskset = rs,
+    actors = actors_map,
+    initial = initial,
+    effects = effects,
+    density = get.density(evls, actors),
+    class = c("remulateTie", "data.frame")
+  )
+  
+  return(output)
 }
+
